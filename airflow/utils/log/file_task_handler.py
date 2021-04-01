@@ -127,35 +127,68 @@ class FileTaskHandler(logging.Handler):
 
                 kube_client = get_kube_client()
 
-                if len(ti.hostname) >= 63:
-                    # Kubernetes takes the pod name and truncates it for the hostname. This truncated hostname
-                    # is returned for the fqdn to comply with the 63 character limit imposed by DNS standards
-                    # on any label of a FQDN.
-                    pod_list = kube_client.list_namespaced_pod(conf.get('kubernetes', 'namespace'))
-                    matches = [
-                        pod.metadata.name
-                        for pod in pod_list.items
-                        if pod.metadata.name.startswith(ti.hostname)
-                    ]
-                    if len(matches) == 1:
-                        if len(matches[0]) > len(ti.hostname):
-                            ti.hostname = matches[0]
-
-                log += '*** Trying to get logs (last 100 lines) from worker pod {} ***\n\n'.format(
-                    ti.hostname
-                )
-
-                res = kube_client.read_namespaced_pod_log(
-                    name=ti.hostname,
+                pod_list = kube_client.list_namespaced_pod(
                     namespace=conf.get('kubernetes', 'namespace'),
-                    container='base',
-                    follow=False,
-                    tail_lines=100,
-                    _preload_content=False,
+                    label_selector='dag_id={},kubernetes_pod_operator=True,task_id={}'.format(ti.dag_id, ti.task_id)
                 )
+                if len(pod_list.items) >= 1:
+                    try:
+                        last_try_number = 0
+                        last_pod_name = None
+                        for pod in pod_list.items:
+                            try_number = int(pod.metadata.labels['try_number'])
+                            if last_try_number < try_number:
+                                last_try_number = try_number
+                                last_pod_name = pod.metadata.name
 
-                for line in res:
-                    log += line.decode()
+                        log += '*** Trying to get logs (last 100 lines) from operator pod {} ***\n\n'.format(
+                            last_pod_name
+                        )
+
+                        res = kube_client.read_namespaced_pod_log(
+                            name=last_pod_name,
+                            namespace=conf.get('kubernetes', 'namespace'),
+                            container='base',
+                            follow=False,
+                            tail_lines=100,
+                            _preload_content=False,
+                        )
+
+                        for line in res:
+                            log += line.decode()
+                    except Exception as f:  # pylint: disable=broad-except
+                        log += '*** Unable to fetch logs from operator pod ***\n{}\n\n'.format(str(f))
+
+                else:
+                    if len(ti.hostname) >= 63:
+                        # Kubernetes takes the pod name and truncates it for the hostname. This truncated hostname
+                        # is returned for the fqdn to comply with the 63 character limit imposed by DNS standards
+                        # on any label of a FQDN.
+                        pod_list = kube_client.list_namespaced_pod(conf.get('kubernetes', 'namespace'))
+                        matches = [
+                            pod.metadata.name
+                            for pod in pod_list.items
+                            if pod.metadata.name.startswith(ti.hostname)
+                        ]
+                        if len(matches) == 1:
+                            if len(matches[0]) > len(ti.hostname):
+                                ti.hostname = matches[0]
+
+                    log += '*** Trying to get logs (last 100 lines) from worker pod {} ***\n\n'.format(
+                        ti.hostname
+                    )
+
+                    res = kube_client.read_namespaced_pod_log(
+                        name=ti.hostname,
+                        namespace=conf.get('kubernetes', 'namespace'),
+                        container='base',
+                        follow=False,
+                        tail_lines=100,
+                        _preload_content=False,
+                    )
+
+                    for line in res:
+                        log += line.decode()
 
             except Exception as f:  # pylint: disable=broad-except
                 log += '*** Unable to fetch logs from worker pod {} ***\n{}\n\n'.format(ti.hostname, str(f))
